@@ -1,0 +1,151 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fluxchart
+
+//@version=5
+const bool DEBUG = false
+const int maxBoxesCount = 500
+const int maxRowSize = 50
+
+indicator("Weighted Volume Profile | Flux Charts", overlay = true, max_boxes_count = maxBoxesCount, max_labels_count = maxBoxesCount, max_lines_count = maxBoxesCount, max_bars_back = 1005)
+analyzeBars = input.int(200, "Analyze Bars", minval = 1, maxval = 1000, group = "General Configuration")
+rowCount = input.int(30, "Row Count", minval = 1, maxval = 1000, group = "General Configuration")
+volumeWeight = input.string("Normal", "Volume Weighting", ["Recent", "Normal", "Past"], group = "General Configuration", display = display.none)
+dbgMode = DEBUG ? input.string("Normal", "[DBG] Mode", options = ["Normal", "Pivots"], group = "General Configuration") : "Normal"
+dbgSwingLen = DEBUG ? input.int(20, "[DBG] Swing Length", tooltip = "Only viable when mode is set to 'Pivots'", group = "General Configuration") : 20
+
+alignSetting = input.string("Left", "Align To", options = ["Left", "Right"], group = "Style")
+POCEnabled = input.bool(true, "POC Line        ", inline = "POC", group = "Style")
+POCLineStyle = input.string("____", "    ", options = ["____", "----", "...."], group = "Style", inline = "POC", display = display.none)
+POCLineWidth = input.int(2, "", options = [1,2,3], group = "Style", inline = "POC", display = display.none)
+POCLineColor = input.color(color.yellow, "", group = "Style", inline = "POC", display = display.none)
+
+bullishColor = input.color(color.green, "Bullish", inline = "color", group = "Style", display = display.none)
+bearishColor = input.color(color.red, "Bearish", inline = "color", group = "Style", display = display.none)
+
+intersectionBody = DEBUG ? input.bool(false, "[DBG] Intersection With Body", group = "General Configuration") : false
+
+type rowType
+    float top
+    float bottom
+    int startIndex
+    int endIndex
+    float totalVolume = 0
+    float bullVolume = 0
+    float bearVolume = 0
+
+    box bullBox = na
+    box bearBox = na
+
+type barType
+    float o = open
+    float c = close
+    float h = high
+    float l = low
+    float v = volume
+
+var float validPivotHigh = 0
+validPivotHigh := nz(ta.pivothigh(dbgSwingLen, dbgSwingLen), validPivotHigh)
+
+var float validPivotLow = 0
+validPivotLow := nz(ta.pivotlow(dbgSwingLen, dbgSwingLen), validPivotLow)
+
+float top = (dbgMode == "Normal" ? ta.highest(analyzeBars) : validPivotHigh)
+float bottom = (dbgMode == "Normal" ? ta.lowest(analyzeBars) : validPivotLow)
+
+float step = (top - bottom) / rowCount
+float gap = rowCount < 100 ? (step / 3.0) : 0
+
+safeDeleteRow (rowType row) =>
+    box.delete(row.bullBox)
+    box.delete(row.bearBox)
+
+var array<rowType> rows = na
+if not na(rows)
+    for i = 0 to rows.size() - 1
+        safeDeleteRow(rows.get(i))
+
+rows := array.new<rowType>(rowCount)
+for x = 0 to rowCount - 1
+    rowTop = top - step * x
+    rows.set(x, rowType.new(rowTop, rowTop - step))
+
+doIntersect (candleTop, candleBottom, rowType row) =>
+    if (candleBottom > row.top)
+        false
+    else if (candleTop < row.bottom)
+        false
+    else
+        true
+
+var float maxVolumeSize = 0
+var float minVolumeSize = 0
+
+f_lin_interpolate(x0, y0, x1, y1, x) =>
+    y0 + (x - x0) * (y1 - y0) / (x1 - x0)
+
+renderRow (startIndex, flip, rowType row) =>
+    totalSize = f_lin_interpolate(minVolumeSize, 1, maxVolumeSize, maxRowSize, row.totalVolume)
+    bullSize = math.round((row.bullVolume / row.totalVolume) * totalSize)
+    bearSize = math.round((row.bearVolume / row.totalVolume) * totalSize)
+    row.startIndex := startIndex
+    if not flip
+        row.endIndex := startIndex + bullSize + bearSize
+        row.bullBox := box.new(startIndex, row.top - gap / 2.0, startIndex + bullSize, row.bottom + gap / 2.0, bgcolor = bullishColor, border_color = color.black, border_width = 0)
+        if bearSize > 0
+            row.bearBox := box.new(startIndex + bullSize, row.top - gap / 2.0, startIndex + bullSize + bearSize, row.bottom + gap / 2.0, bgcolor = bearishColor, border_color = color.black, border_width = 0)
+    else
+        row.endIndex := startIndex - bullSize - bearSize
+        row.bullBox := box.new(startIndex, row.top - gap / 2.0, startIndex - bullSize, row.bottom + gap / 2.0, bgcolor = bullishColor, border_color = color.black, border_width = 0)
+        if bearSize > 0
+            row.bearBox := box.new(startIndex- bullSize, row.top - gap / 2.0, startIndex - bullSize - bearSize, row.bottom + gap / 2.0, bgcolor = bearishColor, border_color = color.black, border_width = 0)
+
+curIndex = bar_index
+
+var line POCLine = na
+const float weightImpact = 0.85
+
+if barstate.islast
+    if rows.size() > 0
+        for i = 0 to analyzeBars
+            for j = 0 to rows.size() - 1
+                curRow = rows.get(j)
+                vol = volume[i]
+                
+                if volumeWeight == "Recent"
+                    vol := ((vol * weightImpact) / (i + 1)) + (vol * (1.0 - weightImpact))
+                
+                if volumeWeight == "Past"
+                    vol := ((vol * weightImpact) * ((i + 1) / analyzeBars)) + (vol * (1.0 - weightImpact))
+                
+                if doIntersect(intersectionBody ? math.max(open[i], close[i]) : high[i], intersectionBody ? math.min(open[i], close[i]) : low[i], curRow)
+                    if close[i] > open[i]
+                        curRow.bullVolume += vol
+                    else
+                        curRow.bearVolume += vol
+                    curRow.totalVolume += vol
+    //
+    rowType maxVolRow = na
+    if rows.size() > 0
+        maxVolumeSize := 0
+        minVolumeSize := rows.get(0).totalVolume
+        
+        for i = 0 to rows.size() - 1
+            curRow = rows.get(i)
+            maxVolumeSize := math.max(maxVolumeSize, curRow.totalVolume)
+            if curRow.totalVolume == maxVolumeSize
+                maxVolRow := curRow
+            minVolumeSize := math.min(minVolumeSize, curRow.totalVolume)
+
+        for i = 0 to rows.size() - 1
+            curRow = rows.get(i)
+            startIndex = alignSetting == "Left" ? (curIndex - analyzeBars + 1) : (curIndex + 75)
+            renderRow(startIndex, alignSetting == "Left" ? false : true, curRow)
+    
+    line.delete(POCLine)
+    if not na(maxVolRow)
+        maxRowMid = (maxVolRow.top + maxVolRow.bottom) / 2.0
+        if POCEnabled
+            if alignSetting == "Left"
+                POCLine := line.new(maxVolRow.endIndex, maxRowMid, bar_index, maxRowMid, extend = extend.right, width = POCLineWidth, color = POCLineColor, style = POCLineStyle == "____" ? line.style_solid : POCLineStyle == "----" ? line.style_dashed : line.style_dotted)
+            else
+                POCLine := line.new(bar_index, maxRowMid, maxVolRow.endIndex, maxRowMid, extend = extend.left, width = POCLineWidth, color = POCLineColor, style = POCLineStyle == "____" ? line.style_solid : POCLineStyle == "----" ? line.style_dashed : line.style_dotted)
